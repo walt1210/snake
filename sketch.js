@@ -18,8 +18,11 @@ const VIDEO_H = 240;
 const PANEL_X = GAME_W + 20; // video panel sits to the right of the game
 const PANEL_Y = 60;
 
-// Deadzone: fraction of half-width/half-height around center that counts as "neutral"
-const DEADZONE = 0.18;
+// Minimum length (in pixels) the wrist->middle-finger vector must have
+// before we trust its angle. Too short usually means the hand is angled
+// toward/away from the camera or fingers are curled, so the direction
+// would be noisy.
+const MIN_POINT_LEN = 40;
 
 // Smoothing factor for the tracked wrist point (0 = no smoothing/very jittery,
 // 1 = frozen/unresponsive). Lower this if it still feels twitchy, raise it
@@ -29,11 +32,20 @@ const SMOOTHING = 0.35;
 // Minimum overall hand-detection confidence to trust it at all (0-1)
 const MIN_CONFIDENCE = 0.6;
 
-// A candidate direction has to be seen this many consecutive frames before
+// A direction has to be seen for several consecutive frames before
 // it's actually applied, to filter out single-frame tracking glitches.
 // Lowered from 3 -> 2 now that draw() runs at 30fps instead of 10fps, so
 // this still represents a real glitch filter without feeling laggy.
 const HOLD_FRAMES = 2;
+
+// Extra angular margin (radians) added to the CURRENTLY committed
+// direction's 90-degree quadrant before we'll let it switch away. This is
+// what actually removes the flicker/jitter you get right at a quadrant
+// boundary (e.g. hand angle hovering between RIGHT and UP) -- without it,
+// a tiny tremor right on the line rapidly toggles the candidate direction.
+// ~0.175 rad ~= 10 degrees of "stickiness". Raise for more stability,
+// lower if turning starts to feel delayed.
+const HYSTERESIS_MARGIN = 0.175;
 
 // ---- Snake move timing (decoupled from frameRate) ----
 // draw() now runs fast (30fps) purely so hand tracking stays smooth/responsive.
@@ -48,10 +60,26 @@ const MIN_MOVE_INTERVAL = 60; // fastest the snake is allowed to go
 
 let currentDir = 'RIGHT'; // human-readable label of last applied direction
 let handStatus = 'Searching for hand...';
-let smoothNx = 0;
-let smoothNy = 0;
+let smoothVx = 1; // smoothed wrist->middle-finger pointing vector (screen space)
+let smoothVy = 0;
 let candidateDir = null;
 let candidateCount = 0;
+
+// Center angle (radians, screen space: +x=right, +y=down) of each direction's
+// quadrant, used for the hysteresis check below. NOTE: uses Math.PI directly
+// (not p5's HALF_PI/PI) because this runs at script-parse time, before p5
+// has attached its constants to window -- using the p5 constants here would
+// throw "HALF_PI is not defined" and silently break the whole sketch.
+const DIR_ANGLES = { RIGHT: 0, DOWN: Math.PI / 2, LEFT: Math.PI, UP: -Math.PI / 2 };
+
+// Shortest signed distance between two angles, wrapped to [-PI, PI], then
+// made absolute -- used to test "how far is this angle from that direction's center".
+function angularDist(a, b) {
+  let d = a - b;
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return Math.abs(d);
+}
 
 // Finger chains for drawing the hand skeleton (by keypoint name)
 const FINGER_CHAINS = [
@@ -188,11 +216,15 @@ function getValidHand() {
   return best;
 }
 
-// ---- Hand-position joystick logic ----
-// Uses the wrist keypoint of the best-detected hand, smooths it over time,
-// and maps it to a directional zone. A direction must be seen for several
-// consecutive frames before it's actually applied, filtering out
-// single-frame tracking glitches.
+// ---- Hand-angle joystick logic ----
+// Instead of asking "where is my hand in the frame", this asks "which way
+// is my hand pointing". We take the vector from the wrist to the middle
+// finger's base knuckle (stable even with fingers curled a bit) and read
+// its angle: point right/left/up/down and the snake follows. The vector
+// is smoothed component-wise (not the angle directly, which would need
+// wraparound handling), then bucketed into a 90-degree quadrant per
+// direction. A direction must hold for HOLD_FRAMES in a row to commit,
+// same glitch filtering as before.
 function updateDirectionFromHand() {
   let hand = getValidHand();
 
@@ -204,7 +236,8 @@ function updateDirectionFromHand() {
   }
 
   let wrist = hand.keypoints.find(k => k.name === 'wrist');
-  if (!wrist) {
+  let midMcp = hand.keypoints.find(k => k.name === 'middle_finger_mcp');
+  if (!wrist || !midMcp) {
     handStatus = 'No hand detected';
     candidateDir = null;
     candidateCount = 0;
@@ -213,29 +246,45 @@ function updateDirectionFromHand() {
 
   handStatus = 'Tracking ' + hand.handedness + ' hand (' + nf(hand.confidence, 1, 2) + ')';
 
-  // Normalize wrist position to [-1, 1] relative to video center
-  let rawNx = (wrist.x - VIDEO_W / 2) / (VIDEO_W / 2);
-  let rawNy = (wrist.y - VIDEO_H / 2) / (VIDEO_H / 2);
-  rawNx = constrain(rawNx, -1, 1);
-  rawNy = constrain(rawNy, -1, 1);
+  // Raw pointing vector: wrist -> middle finger knuckle
+  let rawVx = midMcp.x - wrist.x;
+  let rawVy = midMcp.y - wrist.y;
+  let len = Math.hypot(rawVx, rawVy);
 
-  // Exponential smoothing to cut down on jitter
-  smoothNx = lerp(smoothNx, rawNx, 1 - SMOOTHING);
-  smoothNy = lerp(smoothNy, rawNy, 1 - SMOOTHING);
-
-  // Inside the deadzone -> neutral, no candidate direction
-  if (abs(smoothNx) < DEADZONE && abs(smoothNy) < DEADZONE) {
+  // Too short to read an angle reliably (hand facing camera, fist, etc.)
+  if (len < MIN_POINT_LEN) {
+    handStatus += ' — point more clearly (hand too flat/curled)';
     candidateDir = null;
     candidateCount = 0;
     return;
   }
 
-  // Dominant axis decides the direction, like a joystick
+  // Normalize before smoothing so vector length doesn't bias the smoothed angle
+  rawVx /= len;
+  rawVy /= len;
+
+  // Exponential smoothing on the vector components (avoids angle wraparound issues)
+  smoothVx = lerp(smoothVx, rawVx, 1 - SMOOTHING);
+  smoothVy = lerp(smoothVy, rawVy, 1 - SMOOTHING);
+
+  // atan2 gives angle in screen space where +x = right, +y = down
+  let angle = Math.atan2(smoothVy, smoothVx); // range -PI..PI
+
+  // Bucket into 90-degree quadrants centered on each cardinal direction.
+  // Hysteresis: if the angle is still within the CURRENT direction's
+  // quadrant plus a small extra margin, stick with it instead of switching
+  // -- this is what kills the flicker right at a quadrant boundary.
   let newCandidate;
-  if (abs(smoothNx) > abs(smoothNy)) {
-    newCandidate = smoothNx > 0 ? 'RIGHT' : 'LEFT';
+  if (currentDir && angularDist(angle, DIR_ANGLES[currentDir]) <= QUARTER_PI + HYSTERESIS_MARGIN) {
+    newCandidate = currentDir;
+  } else if (angle > -QUARTER_PI && angle <= QUARTER_PI) {
+    newCandidate = 'RIGHT';
+  } else if (angle > QUARTER_PI && angle <= 3 * QUARTER_PI) {
+    newCandidate = 'DOWN';
+  } else if (angle < -QUARTER_PI && angle >= -3 * QUARTER_PI) {
+    newCandidate = 'UP';
   } else {
-    newCandidate = smoothNy > 0 ? 'DOWN' : 'UP';
+    newCandidate = 'LEFT';
   }
 
   if (newCandidate === candidateDir) {
@@ -342,7 +391,7 @@ function drawCalibrationScreen() {
   textSize(18);
   text('Steering test', GAME_W / 2, 40);
   textSize(13);
-  text('Move your hand outside the yellow circle\nin the camera panel to steer.', GAME_W / 2, 75);
+  text('Point your hand (fingers extended) in a direction\nin the camera panel to steer.', GAME_W / 2, 75);
 
   // Big directional readout so you can confirm tracking works before playing
   textSize(48);
@@ -406,19 +455,35 @@ function drawHandPanel() {
   line(0, VIDEO_H / 3, VIDEO_W, VIDEO_H / 3);
   line(0, (2 * VIDEO_H) / 3, VIDEO_W, (2 * VIDEO_H) / 3);
 
-  // Deadzone circle in the center
-  noFill();
-  stroke(255, 255, 0);
-  let dzRadius = DEADZONE * (VIDEO_W / 2);
-  ellipse(VIDEO_W / 2, VIDEO_H / 2, dzRadius * 2, dzRadius * 2);
+  // Diagonal quadrant-boundary guides (the 4 lines that split the circle
+  // into RIGHT/DOWN/LEFT/UP 90-degree wedges), centered on the wrist-ish
+  // middle of frame just as a visual reference for where the buckets are
+  stroke(255, 255, 0, 120);
+  strokeWeight(1);
+  let cx = VIDEO_W / 2;
+  let cy = VIDEO_H / 2;
+  let guideLen = 70;
+  line(cx - guideLen * cos(QUARTER_PI), cy - guideLen * sin(QUARTER_PI), cx + guideLen * cos(QUARTER_PI), cy + guideLen * sin(QUARTER_PI));
+  line(cx - guideLen * cos(QUARTER_PI), cy + guideLen * sin(QUARTER_PI), cx + guideLen * cos(QUARTER_PI), cy - guideLen * sin(QUARTER_PI));
 
-  // Smoothed wrist position dot (green = committed direction, orange = still building up)
+  // Pointing-direction arrow: drawn from the tracked hand's wrist, showing
+  // the smoothed wrist->middle-finger vector currently being read as a
+  // direction. Green once committed, orange while still building up.
   if (handStatus.startsWith('Tracking')) {
-    let px = VIDEO_W / 2 + smoothNx * (VIDEO_W / 2);
-    let py = VIDEO_H / 2 + smoothNy * (VIDEO_H / 2);
-    noStroke();
-    fill(candidateCount >= HOLD_FRAMES ? color(0, 255, 0) : color(255, 165, 0));
-    ellipse(px, py, 14, 14);
+    let active = getValidHand();
+    let wrist = active && active.keypoints.find(k => k.name === 'wrist');
+    if (wrist) {
+      let arrowLen = 60;
+      let tipX = wrist.x + smoothVx * arrowLen;
+      let tipY = wrist.y + smoothVy * arrowLen;
+      let col = candidateCount >= HOLD_FRAMES ? color(0, 255, 0) : color(255, 165, 0);
+      stroke(col);
+      strokeWeight(3);
+      line(wrist.x, wrist.y, tipX, tipY);
+      noStroke();
+      fill(col);
+      ellipse(tipX, tipY, 10, 10);
+    }
   }
 
   pop();
@@ -429,5 +494,5 @@ function drawHandPanel() {
   textAlign(LEFT, TOP);
   textSize(13);
   text(handStatus + (modelReady ? '' : ' (loading model...)'), PANEL_X, PANEL_Y + VIDEO_H + 8);
-  text('Move outside the yellow circle to steer', PANEL_X, PANEL_Y + VIDEO_H + 26);
+  text('Point in a direction to steer (arrow shows reading)', PANEL_X, PANEL_Y + VIDEO_H + 26);
 }
