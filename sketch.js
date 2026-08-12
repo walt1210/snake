@@ -9,8 +9,8 @@ const GAME_H = 400;
 
 // ---- Hand-joystick state ----
 let video;
-let poseNet;
-let latestPose = null;
+let handPose;
+let hands = [];
 let modelReady = false;
 
 const VIDEO_W = 320;
@@ -24,10 +24,10 @@ const DEADZONE = 0.18;
 // Smoothing factor for the tracked wrist point (0 = no smoothing/very jittery,
 // 1 = frozen/unresponsive). Lower this if it still feels twitchy, raise it
 // if it feels laggy.
-const SMOOTHING = 0.6;
+const SMOOTHING = 0.5;
 
-// Minimum keypoint confidence to trust the wrist position at all
-const MIN_CONFIDENCE = 0.3;
+// Minimum overall hand-detection confidence to trust it at all (0-1)
+const MIN_CONFIDENCE = 0.6;
 
 // A candidate direction has to be seen this many consecutive frames before
 // it's actually applied, to filter out single-frame tracking glitches.
@@ -39,6 +39,15 @@ let smoothNx = 0;
 let smoothNy = 0;
 let candidateDir = null;
 let candidateCount = 0;
+
+// Finger chains for drawing the hand skeleton (by keypoint name)
+const FINGER_CHAINS = [
+  ['wrist', 'thumb_cmc', 'thumb_mcp', 'thumb_ip', 'thumb_tip'],
+  ['wrist', 'index_finger_mcp', 'index_finger_pip', 'index_finger_dip', 'index_finger_tip'],
+  ['wrist', 'middle_finger_mcp', 'middle_finger_pip', 'middle_finger_dip', 'middle_finger_tip'],
+  ['wrist', 'ring_finger_mcp', 'ring_finger_pip', 'ring_finger_dip', 'ring_finger_tip'],
+  ['wrist', 'pinky_finger_mcp', 'pinky_finger_pip', 'pinky_finger_dip', 'pinky_finger_tip']
+];
 
 // ---- Game / app state machine ----
 // 'CALIBRATE' -> practice steering without the snake moving
@@ -58,32 +67,23 @@ function setup() {
   snake = new Snake();
   foodLocation();
 
-  // Webcam capture for PoseNet
+  // Webcam capture for HandPose
   video = createCapture(VIDEO);
   video.size(VIDEO_W, VIDEO_H);
   video.hide();
 
-  poseNet = ml5.poseNet(
-    video,
-    {
-      flipHorizontal: true,
-      detectionType: 'single',
-      architecture: 'ResNet50', // more accurate than the default MobileNet
-      outputStride: 16,
-      minConfidence: MIN_CONFIDENCE
-    },
-    () => {
-      modelReady = true;
-      select('#status').html('PoseNet ready — show your hand to the camera.');
-    }
-  );
-
-  poseNet.on('pose', (results) => {
-    if (results && results.length > 0) {
-      latestPose = results[0].pose;
-    } else {
-      latestPose = null;
-    }
+  // flipped: true tells handPose to return keypoint coordinates already
+  // matching a mirrored ("selfie") view, since we draw the video mirrored
+  // ourselves below (this p5 version doesn't support video.flipped).
+  // detectStart must only be called once the model is actually ready --
+  // calling it immediately after construction races the async model load
+  // and crashes with "Cannot read properties of null (reading 'estimateHands')".
+  handPose = ml5.handPose({ flipped: true, maxHands: 1 }, () => {
+    modelReady = true;
+    select('#status').html('HandPose ready — show your hand to the camera.');
+    handPose.detectStart(video, (results) => {
+      hands = results || [];
+    });
   });
 
   startButton = createButton('Start Game');
@@ -154,41 +154,48 @@ function trySetDir(x, y, label) {
   currentDir = label;
 }
 
+// Returns the most confident detected hand, or null if none pass the
+// confidence threshold. Unlike the old PoseNet approach, handPose only
+// ever reports actual hands — there's no elbow/background confusion to
+// filter out, since the model is purpose-built for hands.
+function getValidHand() {
+  if (!hands || hands.length === 0) return null;
+  let best = null;
+  for (const hnd of hands) {
+    if (hnd.confidence < MIN_CONFIDENCE) continue;
+    if (!best || hnd.confidence > best.confidence) best = hnd;
+  }
+  return best;
+}
+
 // ---- Hand-position joystick logic ----
-// Uses the wrist keypoint (prefers whichever hand PoseNet is more confident
-// about), smooths it over time, and maps it to a directional zone. A
-// direction must be seen for several consecutive frames before it's
-// actually applied, which filters out single-frame tracking glitches.
-function updateDirectionFromPose() {
-  if (!latestPose) {
+// Uses the wrist keypoint of the best-detected hand, smooths it over time,
+// and maps it to a directional zone. A direction must be seen for several
+// consecutive frames before it's actually applied, filtering out
+// single-frame tracking glitches.
+function updateDirectionFromHand() {
+  let hand = getValidHand();
+
+  if (!hand) {
+    handStatus = hands && hands.length > 0 ? 'Hand detected but low confidence' : 'No hand detected';
+    candidateDir = null;
+    candidateCount = 0;
+    return;
+  }
+
+  let wrist = hand.keypoints.find(k => k.name === 'wrist');
+  if (!wrist) {
     handStatus = 'No hand detected';
     candidateDir = null;
     candidateCount = 0;
     return;
   }
 
-  let left = latestPose.keypoints.find(k => k.part === 'leftWrist');
-  let right = latestPose.keypoints.find(k => k.part === 'rightWrist');
-
-  let wrist = null;
-  if (left && right) {
-    wrist = left.score > right.score ? left : right;
-  } else {
-    wrist = left || right;
-  }
-
-  if (!wrist || wrist.score < MIN_CONFIDENCE) {
-    handStatus = 'No hand detected';
-    candidateDir = null;
-    candidateCount = 0;
-    return;
-  }
-
-  handStatus = 'Tracking hand (' + nf(wrist.score, 1, 2) + ')';
+  handStatus = 'Tracking ' + hand.handedness + ' hand (' + nf(hand.confidence, 1, 2) + ')';
 
   // Normalize wrist position to [-1, 1] relative to video center
-  let rawNx = (wrist.position.x - VIDEO_W / 2) / (VIDEO_W / 2);
-  let rawNy = (wrist.position.y - VIDEO_H / 2) / (VIDEO_H / 2);
+  let rawNx = (wrist.x - VIDEO_W / 2) / (VIDEO_W / 2);
+  let rawNy = (wrist.y - VIDEO_H / 2) / (VIDEO_H / 2);
   rawNx = constrain(rawNx, -1, 1);
   rawNy = constrain(rawNy, -1, 1);
 
@@ -230,7 +237,7 @@ function updateDirectionFromPose() {
 function draw() {
   background(30);
 
-  updateDirectionFromPose();
+  updateDirectionFromHand();
 
   drawHeader();
 
@@ -324,17 +331,48 @@ function drawCalibrationScreen() {
   pop();
 }
 
+// Draws the 21-point hand skeleton (finger by finger) for whichever hand is
+// currently being used to steer, in green. This is the debug view for
+// confirming HandPose is actually tracking your hand and not something else.
+function drawHandSkeleton(hand, isActive) {
+  const kp = (name) => hand.keypoints.find(k => k.name === name);
+
+  stroke(isActive ? color(0, 255, 0) : color(255, 255, 255, 90));
+  strokeWeight(isActive ? 2.5 : 1);
+  for (const chain of FINGER_CHAINS) {
+    for (let i = 0; i < chain.length - 1; i++) {
+      let a = kp(chain[i]);
+      let b = kp(chain[i + 1]);
+      if (a && b) line(a.x, a.y, b.x, b.y);
+    }
+  }
+
+  noStroke();
+  fill(isActive ? color(0, 255, 0) : color(200, 200, 200, 150));
+  for (const k of hand.keypoints) {
+    ellipse(k.x, k.y, 5, 5);
+  }
+}
+
 function drawHandPanel() {
   push();
   translate(PANEL_X, PANEL_Y);
 
-  // Video feed (mirrored, since flipHorizontal:true on PoseNet)
+  // Video feed (mirrored; handPose was set up with flipped:true to match)
   if (video) {
     push();
     translate(VIDEO_W, 0);
     scale(-1, 1);
     image(video, 0, 0, VIDEO_W, VIDEO_H);
     pop();
+  }
+
+  // Hand skeleton debug overlay
+  if (hands && hands.length > 0) {
+    let active = getValidHand();
+    for (const hnd of hands) {
+      drawHandSkeleton(hnd, hnd === active);
+    }
   }
 
   // 3x3 grid overlay
@@ -352,7 +390,7 @@ function drawHandPanel() {
   ellipse(VIDEO_W / 2, VIDEO_H / 2, dzRadius * 2, dzRadius * 2);
 
   // Smoothed wrist position dot (green = committed direction, orange = still building up)
-  if (latestPose && handStatus.startsWith('Tracking')) {
+  if (handStatus.startsWith('Tracking')) {
     let px = VIDEO_W / 2 + smoothNx * (VIDEO_W / 2);
     let py = VIDEO_H / 2 + smoothNy * (VIDEO_H / 2);
     noStroke();
