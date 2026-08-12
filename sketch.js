@@ -1,0 +1,372 @@
+// ---- Game state ----
+let snake;
+let rez = 20;
+let food;
+let w;
+let h;
+const GAME_W = 400;
+const GAME_H = 400;
+
+// ---- Hand-joystick state ----
+let video;
+let poseNet;
+let latestPose = null;
+let modelReady = false;
+
+const VIDEO_W = 320;
+const VIDEO_H = 240;
+const PANEL_X = GAME_W + 20; // video panel sits to the right of the game
+const PANEL_Y = 60;
+
+// Deadzone: fraction of half-width/half-height around center that counts as "neutral"
+const DEADZONE = 0.18;
+
+// Smoothing factor for the tracked wrist point (0 = no smoothing/very jittery,
+// 1 = frozen/unresponsive). Lower this if it still feels twitchy, raise it
+// if it feels laggy.
+const SMOOTHING = 0.6;
+
+// Minimum keypoint confidence to trust the wrist position at all
+const MIN_CONFIDENCE = 0.3;
+
+// A candidate direction has to be seen this many consecutive frames before
+// it's actually applied, to filter out single-frame tracking glitches.
+const HOLD_FRAMES = 3;
+
+let currentDir = 'RIGHT'; // human-readable label of last applied direction
+let handStatus = 'Searching for hand...';
+let smoothNx = 0;
+let smoothNy = 0;
+let candidateDir = null;
+let candidateCount = 0;
+
+// ---- Game / app state machine ----
+// 'CALIBRATE' -> practice steering without the snake moving
+// 'PLAYING'   -> normal gameplay
+// 'GAMEOVER'  -> snake died, show score + restart
+let gameState = 'CALIBRATE';
+
+let startButton;
+let restartButton;
+
+function setup() {
+  createCanvas(PANEL_X + VIDEO_W + 20, GAME_H + 100);
+
+  w = floor(GAME_W / rez);
+  h = floor(GAME_H / rez);
+  frameRate(10);
+  snake = new Snake();
+  foodLocation();
+
+  // Webcam capture for PoseNet
+  video = createCapture(VIDEO);
+  video.size(VIDEO_W, VIDEO_H);
+  video.hide();
+
+  poseNet = ml5.poseNet(
+    video,
+    {
+      flipHorizontal: true,
+      detectionType: 'single',
+      architecture: 'ResNet50', // more accurate than the default MobileNet
+      outputStride: 16,
+      minConfidence: MIN_CONFIDENCE
+    },
+    () => {
+      modelReady = true;
+      select('#status').html('PoseNet ready — show your hand to the camera.');
+    }
+  );
+
+  poseNet.on('pose', (results) => {
+    if (results && results.length > 0) {
+      latestPose = results[0].pose;
+    } else {
+      latestPose = null;
+    }
+  });
+
+  startButton = createButton('Start Game');
+  startButton.position(PANEL_X, PANEL_Y + VIDEO_H + 55);
+  startButton.mousePressed(startGame);
+
+  restartButton = createButton('Restart');
+  restartButton.position(GAME_W / 2 - 30, 40 + GAME_H / 2 + 55);
+  restartButton.mousePressed(restartGame);
+  restartButton.hide();
+}
+
+function foodLocation() {
+  let x = floor(random(w));
+  let y = floor(random(h));
+  food = createVector(x, y);
+}
+
+function startGame() {
+  gameState = 'PLAYING';
+  startButton.hide();
+  loop();
+}
+
+function restartGame() {
+  snake = new Snake();
+  foodLocation();
+  candidateDir = null;
+  candidateCount = 0;
+  currentDir = 'RIGHT';
+  gameState = 'PLAYING';
+  restartButton.hide();
+  loop();
+}
+
+// ---- Keyboard fallback (still works alongside hand control) ----
+function keyPressed() {
+  if (gameState === 'CALIBRATE' && keyCode === ENTER) {
+    startGame();
+    return;
+  }
+  if (gameState === 'GAMEOVER' && (key === 'r' || key === 'R')) {
+    restartGame();
+    return;
+  }
+  if (gameState !== 'PLAYING') return;
+
+  if (keyCode === LEFT_ARROW) {
+    trySetDir(-1, 0, 'LEFT');
+  } else if (keyCode === RIGHT_ARROW) {
+    trySetDir(1, 0, 'RIGHT');
+  } else if (keyCode === DOWN_ARROW) {
+    trySetDir(0, 1, 'DOWN');
+  } else if (keyCode === UP_ARROW) {
+    trySetDir(0, -1, 'UP');
+  } else if (key === ' ') {
+    snake.grow();
+  }
+}
+
+// Prevents reversing straight into your own body (important since hand
+// control is less precise than keys, this avoids cheap accidental deaths)
+function trySetDir(x, y, label) {
+  if (snake.xdir === -x && snake.ydir === -y && (snake.xdir !== 0 || snake.ydir !== 0)) {
+    return; // ignore 180-degree reversal
+  }
+  snake.setDir(x, y);
+  currentDir = label;
+}
+
+// ---- Hand-position joystick logic ----
+// Uses the wrist keypoint (prefers whichever hand PoseNet is more confident
+// about), smooths it over time, and maps it to a directional zone. A
+// direction must be seen for several consecutive frames before it's
+// actually applied, which filters out single-frame tracking glitches.
+function updateDirectionFromPose() {
+  if (!latestPose) {
+    handStatus = 'No hand detected';
+    candidateDir = null;
+    candidateCount = 0;
+    return;
+  }
+
+  let left = latestPose.keypoints.find(k => k.part === 'leftWrist');
+  let right = latestPose.keypoints.find(k => k.part === 'rightWrist');
+
+  let wrist = null;
+  if (left && right) {
+    wrist = left.score > right.score ? left : right;
+  } else {
+    wrist = left || right;
+  }
+
+  if (!wrist || wrist.score < MIN_CONFIDENCE) {
+    handStatus = 'No hand detected';
+    candidateDir = null;
+    candidateCount = 0;
+    return;
+  }
+
+  handStatus = 'Tracking hand (' + nf(wrist.score, 1, 2) + ')';
+
+  // Normalize wrist position to [-1, 1] relative to video center
+  let rawNx = (wrist.position.x - VIDEO_W / 2) / (VIDEO_W / 2);
+  let rawNy = (wrist.position.y - VIDEO_H / 2) / (VIDEO_H / 2);
+  rawNx = constrain(rawNx, -1, 1);
+  rawNy = constrain(rawNy, -1, 1);
+
+  // Exponential smoothing to cut down on jitter
+  smoothNx = lerp(smoothNx, rawNx, 1 - SMOOTHING);
+  smoothNy = lerp(smoothNy, rawNy, 1 - SMOOTHING);
+
+  // Inside the deadzone -> neutral, no candidate direction
+  if (abs(smoothNx) < DEADZONE && abs(smoothNy) < DEADZONE) {
+    candidateDir = null;
+    candidateCount = 0;
+    return;
+  }
+
+  // Dominant axis decides the direction, like a joystick
+  let newCandidate;
+  if (abs(smoothNx) > abs(smoothNy)) {
+    newCandidate = smoothNx > 0 ? 'RIGHT' : 'LEFT';
+  } else {
+    newCandidate = smoothNy > 0 ? 'DOWN' : 'UP';
+  }
+
+  if (newCandidate === candidateDir) {
+    candidateCount++;
+  } else {
+    candidateDir = newCandidate;
+    candidateCount = 1;
+  }
+
+  // Only commit once the same direction has been seen for HOLD_FRAMES in a row
+  if (candidateCount >= HOLD_FRAMES) {
+    if (newCandidate === 'RIGHT') trySetDir(1, 0, 'RIGHT');
+    else if (newCandidate === 'LEFT') trySetDir(-1, 0, 'LEFT');
+    else if (newCandidate === 'DOWN') trySetDir(0, 1, 'DOWN');
+    else if (newCandidate === 'UP') trySetDir(0, -1, 'UP');
+  }
+}
+
+function draw() {
+  background(30);
+
+  updateDirectionFromPose();
+
+  drawHeader();
+
+  if (gameState === 'CALIBRATE') {
+    drawCalibrationScreen();
+  } else if (gameState === 'PLAYING') {
+    drawGame();
+  } else if (gameState === 'GAMEOVER') {
+    drawGame();
+    drawGameOverOverlay();
+  }
+
+  drawHandPanel();
+}
+
+function drawHeader() {
+  fill(255);
+  noStroke();
+  textAlign(LEFT, TOP);
+  textSize(16);
+  text('Score: ' + snake.len, 10, 10);
+  textSize(13);
+  text('Direction: ' + currentDir, 150, 12);
+}
+
+function drawGame() {
+  push();
+  translate(0, 40);
+  fill(220);
+  noStroke();
+  rect(0, 0, GAME_W, GAME_H);
+
+  push();
+  scale(rez);
+  if (gameState === 'PLAYING') {
+    if (snake.eat(food)) {
+      foodLocation();
+    }
+    snake.update();
+  }
+  snake.show();
+  noStroke();
+  fill(255, 0, 0);
+  rect(food.x, food.y, 1, 1);
+  pop();
+
+  if (gameState === 'PLAYING' && snake.endGame()) {
+    gameState = 'GAMEOVER';
+    restartButton.show();
+  }
+  pop();
+}
+
+function drawGameOverOverlay() {
+  push();
+  translate(0, 40);
+  fill(200, 0, 0, 180);
+  noStroke();
+  rect(0, 0, GAME_W, GAME_H);
+  fill(255);
+  textAlign(CENTER, CENTER);
+  textSize(26);
+  text('GAME OVER', GAME_W / 2, GAME_H / 2 - 20);
+  textSize(16);
+  text('Score: ' + snake.len, GAME_W / 2, GAME_H / 2 + 15);
+  textSize(12);
+  text('Press R or click Restart', GAME_W / 2, GAME_H / 2 + 40);
+  pop();
+}
+
+function drawCalibrationScreen() {
+  push();
+  translate(0, 40);
+  fill(220);
+  noStroke();
+  rect(0, 0, GAME_W, GAME_H);
+  fill(20);
+  textAlign(CENTER, CENTER);
+  textSize(18);
+  text('Steering test', GAME_W / 2, 40);
+  textSize(13);
+  text('Move your hand outside the yellow circle\nin the camera panel to steer.', GAME_W / 2, 75);
+
+  // Big directional readout so you can confirm tracking works before playing
+  textSize(48);
+  let label = candidateDir || '·';
+  text(label, GAME_W / 2, GAME_H / 2);
+
+  textSize(13);
+  text('Press ENTER or click "Start Game" when ready', GAME_W / 2, GAME_H - 40);
+  pop();
+}
+
+function drawHandPanel() {
+  push();
+  translate(PANEL_X, PANEL_Y);
+
+  // Video feed (mirrored, since flipHorizontal:true on PoseNet)
+  if (video) {
+    push();
+    translate(VIDEO_W, 0);
+    scale(-1, 1);
+    image(video, 0, 0, VIDEO_W, VIDEO_H);
+    pop();
+  }
+
+  // 3x3 grid overlay
+  stroke(255, 255, 255, 150);
+  strokeWeight(1);
+  line(VIDEO_W / 3, 0, VIDEO_W / 3, VIDEO_H);
+  line((2 * VIDEO_W) / 3, 0, (2 * VIDEO_W) / 3, VIDEO_H);
+  line(0, VIDEO_H / 3, VIDEO_W, VIDEO_H / 3);
+  line(0, (2 * VIDEO_H) / 3, VIDEO_W, (2 * VIDEO_H) / 3);
+
+  // Deadzone circle in the center
+  noFill();
+  stroke(255, 255, 0);
+  let dzRadius = DEADZONE * (VIDEO_W / 2);
+  ellipse(VIDEO_W / 2, VIDEO_H / 2, dzRadius * 2, dzRadius * 2);
+
+  // Smoothed wrist position dot (green = committed direction, orange = still building up)
+  if (latestPose && handStatus.startsWith('Tracking')) {
+    let px = VIDEO_W / 2 + smoothNx * (VIDEO_W / 2);
+    let py = VIDEO_H / 2 + smoothNy * (VIDEO_H / 2);
+    noStroke();
+    fill(candidateCount >= HOLD_FRAMES ? color(0, 255, 0) : color(255, 165, 0));
+    ellipse(px, py, 14, 14);
+  }
+
+  pop();
+
+  // Status text below video panel
+  fill(255);
+  noStroke();
+  textAlign(LEFT, TOP);
+  textSize(13);
+  text(handStatus + (modelReady ? '' : ' (loading model...)'), PANEL_X, PANEL_Y + VIDEO_H + 8);
+  text('Move outside the yellow circle to steer', PANEL_X, PANEL_Y + VIDEO_H + 26);
+}
