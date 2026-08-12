@@ -54,10 +54,19 @@ class Snake {
   }
   
   show() {
+  	noStroke();
   	for(let i = 0; i < this.body.length; i++) {
-    	fill(0);
-      //noStroke();
-      rect(this.body[i].x, this.body[i].y, 1, 1)
+      let isHead = i === this.body.length - 1;
+      // Head reads as a bright cream so direction is always obvious at a
+      // glance; body fades toward a deeper coral tail so motion has a sense
+      // of "trail" rather than a flat solid block.
+      if (isHead) {
+        fill('#EDEAE3');
+      } else {
+        let t = i / max(1, this.body.length - 2);
+        fill(lerpColor(color('#B23A4E'), color('#FF6B7A'), t));
+      }
+      rect(this.body[i].x, this.body[i].y, 1, 1, 0.25);
     }
   }
 

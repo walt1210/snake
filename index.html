@@ -5,12 +5,22 @@
     <script src="p5_dom_min.js"></script>
     <script src="p5_sound_min.js"></script>
     <script src="ml5_min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" type="text/css" href="style.css">
     <meta charset="utf-8" />
     <title>Hand-Controlled Snake</title>
   </head>
   <body>
-    <div id="status">Loading PoseNet model...</div>
+    <div id="app">
+      <div id="topbar">
+        <span id="topbar-mark">◆</span>
+        <span id="topbar-title">HAND-CONTROLLED SNAKE</span>
+        <span id="status">Loading model…</span>
+      </div>
+      <div id="canvas-holder"></div>
+    </div>
     <script src="snake.js"></script>
     <script src="sketch.js"></script>
   </body>

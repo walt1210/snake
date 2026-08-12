@@ -1,3 +1,16 @@
+// ---- Visual design tokens ----
+const COL_BG = '#14171C';
+const COL_PANEL = '#1C212B';
+const COL_BORDER = '#2E3542';
+const COL_GRID = '#242A35';
+const COL_TEXT = '#EDEAE3';
+const COL_MUTED = '#8891A3';
+const COL_CORAL = '#FF6B7A';   // game / snake / food
+const COL_CYAN = '#4FD9E8';    // hand-tracking / HUD
+const COL_AMBER = '#F5B44D';   // "building up" state
+const FONT_DISPLAY = 'Space Grotesk, sans-serif';
+const FONT_MONO = 'IBM Plex Mono, monospace';
+
 // ---- Game state ----
 let snake;
 let rez = 20;
@@ -100,7 +113,9 @@ let startButton;
 let restartButton;
 
 function setup() {
-  createCanvas(PANEL_X + VIDEO_W + 20, GAME_H + 100);
+  let cnv = createCanvas(PANEL_X + VIDEO_W + 20, GAME_H + 100);
+  cnv.parent('canvas-holder');
+  textFont(FONT_MONO);
 
   w = floor(GAME_W / rez);
   h = floor(GAME_H / rez);
@@ -304,7 +319,7 @@ function updateDirectionFromHand() {
 }
 
 function draw() {
-  background(30);
+  background(COL_BG);
 
   updateDirectionFromHand();
 
@@ -322,23 +337,52 @@ function draw() {
   drawHandPanel();
 }
 
-function drawHeader() {
-  fill(255);
+// A small pill-shaped HUD readout: a muted label above a bold value,
+// used for score/direction/speed so the header reads like instrument data
+// rather than plain debug text.
+function drawReadout(x, y, w, label, value, accent) {
+  push();
+  translate(x, y);
   noStroke();
+  fill(COL_PANEL);
+  stroke(COL_BORDER);
+  strokeWeight(1);
+  rect(0, 0, w, 34, 8);
+
+  noStroke();
+  fill(COL_MUTED);
+  textFont(FONT_MONO);
+  textSize(9);
   textAlign(LEFT, TOP);
-  textSize(16);
-  text('Score: ' + snake.len, 10, 10);
-  textSize(13);
-  text('Direction: ' + currentDir, 150, 12);
-  text('Speed: ' + moveInterval + 'ms/step', 260, 12);
+  text(label, 10, 6);
+
+  fill(accent || COL_TEXT);
+  textFont(FONT_DISPLAY);
+  textSize(14);
+  textAlign(LEFT, TOP);
+  text(value, 10, 16);
+  pop();
+}
+
+function drawHeader() {
+  drawReadout(10, 6, 110, 'SCORE', String(snake.len), COL_TEXT);
+  drawReadout(128, 6, 130, 'DIRECTION', currentDir, COL_CORAL);
+  drawReadout(266, 6, 134, 'SPEED', moveInterval + ' ms/step', COL_CYAN);
 }
 
 function drawGame() {
   push();
   translate(0, 40);
-  fill(220);
-  noStroke();
-  rect(0, 0, GAME_W, GAME_H);
+  fill(COL_PANEL);
+  stroke(COL_BORDER);
+  strokeWeight(1);
+  rect(0, 0, GAME_W, GAME_H, 10);
+
+  // Graph-paper grid, subtle -- reinforces the "board" reading of the play area
+  stroke(COL_GRID);
+  strokeWeight(1);
+  for (let gx = rez; gx < GAME_W; gx += rez) line(gx, 1, gx, GAME_H - 1);
+  for (let gy = rez; gy < GAME_H; gy += rez) line(1, gy, GAME_W - 1, gy);
 
   push();
   scale(rez);
@@ -352,8 +396,12 @@ function drawGame() {
   }
   snake.show();
   noStroke();
-  fill(255, 0, 0);
-  rect(food.x, food.y, 1, 1);
+  // Food: soft coral glow that gently pulses, drawn under the solid dot
+  let pulse = 0.55 + 0.25 * sin(frameCount * 0.15);
+  fill(red(color(COL_CORAL)), green(color(COL_CORAL)), blue(color(COL_CORAL)), 70 * pulse);
+  ellipse(food.x + 0.5, food.y + 0.5, 2.1, 2.1);
+  fill(COL_CORAL);
+  rect(food.x, food.y, 1, 1, 0.2);
   pop();
 
   if (gameState === 'PLAYING' && snake.endGame()) {
@@ -366,40 +414,61 @@ function drawGame() {
 function drawGameOverOverlay() {
   push();
   translate(0, 40);
-  fill(200, 0, 0, 180);
   noStroke();
-  rect(0, 0, GAME_W, GAME_H);
-  fill(255);
+  fill(20, 22, 28, 225);
+  rect(0, 0, GAME_W, GAME_H, 10);
+
+  fill(COL_CORAL);
+  textFont(FONT_DISPLAY);
   textAlign(CENTER, CENTER);
-  textSize(26);
-  text('GAME OVER', GAME_W / 2, GAME_H / 2 - 20);
-  textSize(16);
-  text('Score: ' + snake.len, GAME_W / 2, GAME_H / 2 + 15);
-  textSize(12);
-  text('Press R or click Restart', GAME_W / 2, GAME_H / 2 + 40);
+  textSize(13);
+  text('GAME OVER', GAME_W / 2, GAME_H / 2 - 34);
+
+  fill(COL_TEXT);
+  textSize(40);
+  text(snake.len, GAME_W / 2, GAME_H / 2 - 2);
+
+  fill(COL_MUTED);
+  textFont(FONT_MONO);
+  textSize(11);
+  text('FINAL SCORE', GAME_W / 2, GAME_H / 2 + 28);
+
+  fill(COL_CYAN);
+  textSize(11);
+  text('Press R or click Restart', GAME_W / 2, GAME_H / 2 + 54);
   pop();
 }
 
 function drawCalibrationScreen() {
   push();
   translate(0, 40);
-  fill(220);
+  fill(COL_PANEL);
+  stroke(COL_BORDER);
+  strokeWeight(1);
+  rect(0, 0, GAME_W, GAME_H, 10);
+
   noStroke();
-  rect(0, 0, GAME_W, GAME_H);
-  fill(20);
+  fill(COL_CYAN);
+  textFont(FONT_MONO);
   textAlign(CENTER, CENTER);
-  textSize(18);
-  text('Steering test', GAME_W / 2, 40);
-  textSize(13);
-  text('Point your hand (fingers extended) in a direction\nin the camera panel to steer.', GAME_W / 2, 75);
+  textSize(10);
+  text('STEERING TEST', GAME_W / 2, 36);
+
+  fill(COL_MUTED);
+  textSize(11);
+  text('Point your hand (fingers extended) in a direction\nin the camera panel to steer.', GAME_W / 2, 62);
 
   // Big directional readout so you can confirm tracking works before playing
-  textSize(48);
+  fill(COL_TEXT);
+  textFont(FONT_DISPLAY);
+  textSize(42);
   let label = candidateDir || '·';
   text(label, GAME_W / 2, GAME_H / 2);
 
-  textSize(13);
-  text('Press ENTER or click "Start Game" when ready', GAME_W / 2, GAME_H - 40);
+  fill(COL_MUTED);
+  textFont(FONT_MONO);
+  textSize(11);
+  text('Press ENTER or click "Start Game" when ready', GAME_W / 2, GAME_H - 34);
   pop();
 }
 
@@ -409,7 +478,7 @@ function drawCalibrationScreen() {
 function drawHandSkeleton(hand, isActive) {
   const kp = (name) => hand.keypoints.find(k => k.name === name);
 
-  stroke(isActive ? color(0, 255, 0) : color(255, 255, 255, 90));
+  stroke(isActive ? color(COL_CYAN) : color(140, 148, 163, 90));
   strokeWeight(isActive ? 2.5 : 1);
   for (const chain of FINGER_CHAINS) {
     for (let i = 0; i < chain.length - 1; i++) {
@@ -420,15 +489,31 @@ function drawHandSkeleton(hand, isActive) {
   }
 
   noStroke();
-  fill(isActive ? color(0, 255, 0) : color(200, 200, 200, 150));
+  fill(isActive ? color(COL_CYAN) : color(140, 148, 163, 150));
   for (const k of hand.keypoints) {
     ellipse(k.x, k.y, 5, 5);
   }
 }
 
+// Small L-shaped bracket, like a camera viewfinder corner. dx/dy pick which
+// corner (±1) so the same call works for all four.
+function corner(x, y, dx, dy, len) {
+  line(x, y, x + dx * len, y);
+  line(x, y, x, y + dy * len);
+}
+
 function drawHandPanel() {
   push();
   translate(PANEL_X, PANEL_Y);
+
+  // Panel backing + viewfinder frame
+  noStroke();
+  fill(COL_PANEL);
+  rect(-10, -10, VIDEO_W + 20, VIDEO_H + 60, 10);
+  stroke(COL_BORDER);
+  strokeWeight(1);
+  noFill();
+  rect(0, 0, VIDEO_W, VIDEO_H, 4);
 
   // Video feed (mirrored; handPose was set up with flipped:true to match)
   if (video) {
@@ -447,18 +532,9 @@ function drawHandPanel() {
     }
   }
 
-  // 3x3 grid overlay
-  stroke(255, 255, 255, 150);
-  strokeWeight(1);
-  line(VIDEO_W / 3, 0, VIDEO_W / 3, VIDEO_H);
-  line((2 * VIDEO_W) / 3, 0, (2 * VIDEO_W) / 3, VIDEO_H);
-  line(0, VIDEO_H / 3, VIDEO_W, VIDEO_H / 3);
-  line(0, (2 * VIDEO_H) / 3, VIDEO_W, (2 * VIDEO_H) / 3);
-
-  // Diagonal quadrant-boundary guides (the 4 lines that split the circle
-  // into RIGHT/DOWN/LEFT/UP 90-degree wedges), centered on the wrist-ish
-  // middle of frame just as a visual reference for where the buckets are
-  stroke(255, 255, 0, 120);
+  // Cyan quadrant guides -- faint reference lines for where the four
+  // direction buckets (RIGHT/DOWN/LEFT/UP) split
+  stroke(79, 217, 232, 70);
   strokeWeight(1);
   let cx = VIDEO_W / 2;
   let cy = VIDEO_H / 2;
@@ -466,17 +542,35 @@ function drawHandPanel() {
   line(cx - guideLen * cos(QUARTER_PI), cy - guideLen * sin(QUARTER_PI), cx + guideLen * cos(QUARTER_PI), cy + guideLen * sin(QUARTER_PI));
   line(cx - guideLen * cos(QUARTER_PI), cy + guideLen * sin(QUARTER_PI), cx + guideLen * cos(QUARTER_PI), cy - guideLen * sin(QUARTER_PI));
 
-  // Pointing-direction arrow: drawn from the tracked hand's wrist, showing
-  // the smoothed wrist->middle-finger vector currently being read as a
-  // direction. Green once committed, orange while still building up.
+  // Pointing-direction arrow + rotating "lock-on" ring around the wrist --
+  // this is the signature moment: it reads as a tracking-lock indicator,
+  // like a computer-vision demo confirming what it's watching.
   if (handStatus.startsWith('Tracking')) {
     let active = getValidHand();
     let wrist = active && active.keypoints.find(k => k.name === 'wrist');
     if (wrist) {
+      let locked = candidateCount >= HOLD_FRAMES;
+      let col = locked ? color(COL_CYAN) : color(COL_AMBER);
+
+      // Rotating dashed ring, slow when idle, so the panel always feels alive
+      push();
+      translate(wrist.x, wrist.y);
+      rotate(frameCount * 0.02);
+      stroke(col);
+      strokeWeight(1.5);
+      noFill();
+      let segs = 10;
+      for (let i = 0; i < segs; i++) {
+        let a0 = (TWO_PI / segs) * i;
+        let a1 = a0 + (TWO_PI / segs) * 0.55;
+        arc(0, 0, 34, 34, a0, a1);
+      }
+      pop();
+
+      // Direction arrow
       let arrowLen = 60;
       let tipX = wrist.x + smoothVx * arrowLen;
       let tipY = wrist.y + smoothVy * arrowLen;
-      let col = candidateCount >= HOLD_FRAMES ? color(0, 255, 0) : color(255, 165, 0);
       stroke(col);
       strokeWeight(3);
       line(wrist.x, wrist.y, tipX, tipY);
@@ -486,13 +580,28 @@ function drawHandPanel() {
     }
   }
 
+  // Viewfinder corner brackets, drawn last so they sit above the video
+  stroke(COL_CYAN);
+  strokeWeight(2);
+  let bl = 16;
+  corner(0, 0, 1, 1, bl);
+  corner(VIDEO_W, 0, -1, 1, bl);
+  corner(0, VIDEO_H, 1, -1, bl);
+  corner(VIDEO_W, VIDEO_H, -1, -1, bl);
+
   pop();
 
-  // Status text below video panel
-  fill(255);
+  // Status readout below the video panel
+  push();
+  translate(PANEL_X, PANEL_Y + VIDEO_H + 14);
   noStroke();
+  fill(handStatus.startsWith('Tracking') ? COL_CYAN : COL_MUTED);
+  textFont(FONT_MONO);
+  textSize(11);
   textAlign(LEFT, TOP);
-  textSize(13);
-  text(handStatus + (modelReady ? '' : ' (loading model...)'), PANEL_X, PANEL_Y + VIDEO_H + 8);
-  text('Point in a direction to steer (arrow shows reading)', PANEL_X, PANEL_Y + VIDEO_H + 26);
+  text(handStatus + (modelReady ? '' : ' (loading model...)'), 0, 0);
+  fill(COL_MUTED);
+  textSize(10.5);
+  text('Point in a direction to steer — arrow shows reading', 0, 18);
+  pop();
 }
