@@ -24,14 +24,27 @@ const DEADZONE = 0.18;
 // Smoothing factor for the tracked wrist point (0 = no smoothing/very jittery,
 // 1 = frozen/unresponsive). Lower this if it still feels twitchy, raise it
 // if it feels laggy.
-const SMOOTHING = 0.5;
+const SMOOTHING = 0.35;
 
 // Minimum overall hand-detection confidence to trust it at all (0-1)
 const MIN_CONFIDENCE = 0.6;
 
 // A candidate direction has to be seen this many consecutive frames before
 // it's actually applied, to filter out single-frame tracking glitches.
-const HOLD_FRAMES = 3;
+// Lowered from 3 -> 2 now that draw() runs at 30fps instead of 10fps, so
+// this still represents a real glitch filter without feeling laggy.
+const HOLD_FRAMES = 2;
+
+// ---- Snake move timing (decoupled from frameRate) ----
+// draw() now runs fast (30fps) purely so hand tracking stays smooth/responsive.
+// The snake itself advances on its own timer below, independent of draw's rate.
+let moveInterval = 150; // ms between snake steps; lower = faster snake
+let lastMoveTime = 0;
+
+// Optional progressive difficulty: shrink moveInterval each time the snake
+// eats, down to a floor, so the game speeds up as the score climbs.
+const SPEED_UP_PER_FOOD = 4; // ms shaved off moveInterval per food eaten
+const MIN_MOVE_INTERVAL = 60; // fastest the snake is allowed to go
 
 let currentDir = 'RIGHT'; // human-readable label of last applied direction
 let handStatus = 'Searching for hand...';
@@ -63,7 +76,11 @@ function setup() {
 
   w = floor(GAME_W / rez);
   h = floor(GAME_H / rez);
-  frameRate(10);
+  // Run draw() at a much higher, steady rate than the old 10fps. Hand
+  // tracking now samples every frame, so it stays smooth and responsive;
+  // snake movement is paced separately below via moveInterval, so this
+  // does NOT make the snake itself faster.
+  frameRate(30);
   snake = new Snake();
   foodLocation();
 
@@ -104,6 +121,7 @@ function foodLocation() {
 
 function startGame() {
   gameState = 'PLAYING';
+  lastMoveTime = millis();
   startButton.hide();
   loop();
 }
@@ -114,6 +132,8 @@ function restartGame() {
   candidateDir = null;
   candidateCount = 0;
   currentDir = 'RIGHT';
+  moveInterval = 150;
+  lastMoveTime = millis();
   gameState = 'PLAYING';
   restartButton.hide();
   loop();
@@ -261,6 +281,7 @@ function drawHeader() {
   text('Score: ' + snake.len, 10, 10);
   textSize(13);
   text('Direction: ' + currentDir, 150, 12);
+  text('Speed: ' + moveInterval + 'ms/step', 260, 12);
 }
 
 function drawGame() {
@@ -272,9 +293,11 @@ function drawGame() {
 
   push();
   scale(rez);
-  if (gameState === 'PLAYING') {
+  if (gameState === 'PLAYING' && millis() - lastMoveTime > moveInterval) {
+    lastMoveTime = millis();
     if (snake.eat(food)) {
       foodLocation();
+      moveInterval = max(MIN_MOVE_INTERVAL, moveInterval - SPEED_UP_PER_FOOD);
     }
     snake.update();
   }
